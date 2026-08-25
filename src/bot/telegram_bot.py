@@ -658,24 +658,7 @@ class MovieClubBot:
                     data={"watcher": watcher},
                 )
 
-        # 시작 알림 전송
-        if self.chat_ids:
-            bot = application.bot
-            start_msg = (
-                "🚀 *영화 동아리 알림 봇이 시작되었습니다\\!*\n\n"
-                f"📡 모니터링 항목: {len(enabled_watchers)}개\n"
-                f"👥 등록된 채팅: {len(self.chat_ids)}개\n\n"
-                "새 상영 일정이나 공지가 뜨면 바로 알려드릴게요 🎬"
-            )
-            for chat_id in self.chat_ids:
-                try:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=start_msg,
-                        parse_mode=ParseMode.MARKDOWN_V2,
-                    )
-                except Exception as e:
-                    logger.warning(f"시작 알림 전송 실패 ({chat_id}): {e}")
+
 
     def run(self):
         """봇을 실행합니다."""
