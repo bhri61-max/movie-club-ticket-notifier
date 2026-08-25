@@ -1,0 +1,62 @@
+name: 오디세이 광교 IMAX 보조 감시
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: movie-club-ticket-notifier
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+
+    steps:
+      - name: 저장소 받기
+        uses: actions/checkout@v7
+
+      - name: Python 설정
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: 필요한 프로그램 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+
+      - name: Telegram Secret 적용
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          p = Path("config.yaml")
+          text = p.read_text(encoding="utf-8")
+
+          text = text.replace(
+              'bot_token: "YOUR_BOT_TOKEN_HERE"',
+              f'bot_token: "{os.environ["TELEGRAM_BOT_TOKEN"]}"'
+          )
+          text = text.replace(
+              '- "YOUR_CHAT_ID_HERE"',
+              f'- "{os.environ["TELEGRAM_CHAT_ID"]}"'
+          )
+
+          p.write_text(text, encoding="utf-8")
+          PY
+
+      - name: CGV 감시 실행
+        run: |
+          timeout 3600 python main.py
