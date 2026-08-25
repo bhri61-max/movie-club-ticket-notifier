@@ -2,15 +2,6 @@ name: 오디세이 광교 IMAX 보조 감시
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "7 * * * *"
-
-permissions:
-  contents: read
-
-concurrency:
-  group: movie-club-ticket-notifier
-  cancel-in-progress: true
 
 jobs:
   monitor:
@@ -19,10 +10,10 @@ jobs:
 
     steps:
       - name: 저장소 받기
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Python 설정
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -32,6 +23,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Chrome 및 ChromeDriver 설치
+        id: setup-chrome
         uses: browser-actions/setup-chrome@v2
         with:
           chrome-version: stable
@@ -64,5 +56,10 @@ jobs:
           PY
 
       - name: CGV 감시 실행
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          CHROMEDRIVER_PATH: ${{ steps.setup-chrome.outputs.chromedriver-path }}
         run: |
+          echo "Chrome: $CHROME_PATH"
+          echo "ChromeDriver: $CHROMEDRIVER_PATH"
           timeout 3600 python main.py
