@@ -1,0 +1,39 @@
+# CGV 광교 IMAX 오디세이 감시
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+  chat_ids:
+    - "YOUR_CHAT_ID_HERE"
+  language: "ko"
+
+watchers:
+  - name: "CGV 광교 IMAX 오디세이"
+    type: "cgv"
+    enabled: true
+    interval_minutes: 5
+
+    settings:
+      theater_code: "0257"
+      area_code: "12"
+      days_ahead: 14
+
+      hall_keywords:
+        - "IMAX"
+
+      movie_keywords:
+        - "오디세이"
+
+      open_mode: "both"
+      web_url: "https://cgv.co.kr/"
+      app_store_url: "https://apps.apple.com/kr/app/cgv/id388521649"
+
+advanced:
+  selenium:
+    headless: true
+    timeout: 30
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+  state_dir: "./data/state"
+  log_level: "INFO"
+  max_retries: 3
+  cooldown_minutes: 60
