@@ -9,7 +9,6 @@ Cloudflare 보호를 우회하기 위해 실제 브라우저를 사용합니다.
   2. requests fallback - Selenium 실패 시 시도
 """
 
-import os
 import re
 import logging
 from datetime import datetime, timedelta
@@ -75,19 +74,6 @@ class CGVCrawler:
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option("useAutomationExtension", False)
 
-            chrome_path = os.environ.get("CHROME_PATH")
-            driver_path = os.environ.get("CHROMEDRIVER_PATH")
-
-            if chrome_path:
-               options.binary_location = chrome_path
-   
-            if driver_path:
-            service = Service(driver_path)
-            self._driver = webdriver.Chrome(
-                service=service,
-                 options=options
-            )
-            else:
             self._driver = webdriver.Chrome(options=options)
             # navigator.webdriver 속성 제거
             self._driver.execute_cdp_cmd(
