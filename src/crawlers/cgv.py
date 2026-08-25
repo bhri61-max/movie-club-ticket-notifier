@@ -82,13 +82,13 @@ class CGVCrawler:
                options.binary_location = chrome_path
    
             if driver_path:
-                service = Service(driver_path)
-                self._driver = webdriver.Chrome(
-                    service=service,
-                    options=options
+            service = Service(driver_path)
+            self._driver = webdriver.Chrome(
+                service=service,
+                 options=options
             )
-           else:
-               self._driver = webdriver.Chrome(options=options)
+            else:
+            self._driver = webdriver.Chrome(options=options)
             # navigator.webdriver 속성 제거
             self._driver.execute_cdp_cmd(
                 "Page.addScriptToEvaluateOnNewDocument",
