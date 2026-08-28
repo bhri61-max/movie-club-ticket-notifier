@@ -3,12 +3,18 @@ name: 오디세이 광교 IMAX 보조 감시
 on:
   workflow_dispatch:
   schedule:
-    - cron: "5 * * * *"
+    # 매시간 2분에 새 감시를 시작하고 약 59분간 실행
+    # GitHub 스케줄 지연을 고려해 다음 실행과의 겹침을 최소화
+    - cron: "2 * * * *"
+
+concurrency:
+  group: odyssey-gwanggyo-imax-monitor
+  cancel-in-progress: false
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 62
 
     steps:
       - name: 저장소 받기
@@ -64,4 +70,4 @@ jobs:
         run: |
           echo "Chrome: $CHROME_PATH"
           echo "ChromeDriver: $CHROMEDRIVER_PATH"
-          timeout 3600 python main.py || true
+          timeout 3540 python main.py || true
