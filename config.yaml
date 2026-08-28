@@ -19,6 +19,7 @@ watchers:
 
       hall_keywords:
         - "IMAX"
+        - "6관"
 
       movie_keywords:
         - "오디세이"
