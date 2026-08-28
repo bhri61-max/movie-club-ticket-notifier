@@ -8,7 +8,7 @@ on:
     - cron: "17 * * * *"
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 concurrency:
@@ -95,3 +95,23 @@ jobs:
           fi
 
           exit "$code"
+
+      - name: 상태 파일 저장
+        if: always()
+        run: |
+          if compgen -G "data/state/*.json" > /dev/null; then
+            git config user.name "cgv-imax-monitor"
+            git config user.email "actions@github.com"
+            git add -f data/state/*.json
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Update IMAX monitor state [skip ci]"
+              git pull --rebase origin main
+              git push origin HEAD:main
+              echo "IMAX 감시 상태 저장 완료"
+            else
+              echo "상태 변경 없음"
+            fi
+          else
+            echo "저장할 상태 파일 없음"
+          fi
