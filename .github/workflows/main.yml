@@ -86,11 +86,13 @@ jobs:
           echo "ChromeDriver: $CHROMEDRIVER_PATH"
 
           set +e
-          timeout 3540 python main.py
+          # 59분 후 Ctrl+C 방식으로 정상 종료를 시도하고,
+          # 30초 안에 종료되지 않으면 강제로 KILL하여 다음 실행이 막히지 않게 한다.
+          timeout --signal=INT --kill-after=30s 3540s python -u main.py
           code=$?
 
-          if [ "$code" -eq 124 ]; then
-            echo "정상: 59분 감시 완료"
+          if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+            echo "정상: 59분 감시 완료 및 강제 종료 처리"
             exit 0
           fi
 
