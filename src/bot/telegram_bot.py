@@ -250,7 +250,79 @@ class MovieClubBot:
             logger.debug(f"[{name}] 데이터 없음")
             return result_info
 
-        # 변경 감지
+        # CGV는 단순 페이지 해시가 아니라 "새 IMAX 회차"만 알림한다.
+        # 좌석 수 변화/정렬 변화/기존 날짜의 변경은 알림하지 않는다.
+        if wtype == "cgv":
+            schedules = result.get("schedules", [])
+            settings = watcher.get("settings", {})
+            notify_from = str(settings.get("notify_from_date", "")).replace("-", "").strip()
+
+            state = self.state_mgr.get_state(name)
+            seen_keys = set(state.get("cgv_seen_schedule_keys", []))
+
+            current_keys = set()
+            schedule_key_map = {}
+
+            for item in schedules:
+                date_raw = str(item.get("date_raw", "")).replace("-", "")
+                if notify_from and date_raw and date_raw < notify_from:
+                    continue
+
+                movie = str(item.get("movie", "")).strip()
+                hall = str(item.get("hall", "")).strip()
+
+                for time_info in item.get("times", []):
+                    start = str(time_info.get("start", "")).strip()
+                    if not date_raw or not start:
+                        continue
+                    key = f"{date_raw}|{movie}|{hall}|{start}"
+                    current_keys.add(key)
+                    schedule_key_map[key] = (item, time_info)
+
+            new_keys = current_keys - seen_keys
+
+            # 한 번 본 회차는 사라졌다 다시 나타나도 중복 알림하지 않는다.
+            state["cgv_seen_schedule_keys"] = sorted(seen_keys | current_keys)
+            state["cgv_notify_from_date"] = notify_from
+            self.state_mgr.save_state(name, state)
+            self.state_mgr.update_hash(name, raw_data)
+
+            if not new_keys:
+                logger.info(
+                    f"[{name}] 새 IMAX 회차 없음 "
+                    f"(알림 시작일={notify_from or '제한없음'}, 현재={len(current_keys)}건)"
+                )
+                return result_info
+
+            # 새로 생긴 회차만 메시지에 포함한다.
+            grouped = {}
+            for key in sorted(new_keys):
+                item, time_info = schedule_key_map[key]
+                group_key = (
+                    str(item.get("date_raw", "")),
+                    str(item.get("movie", "")),
+                    str(item.get("hall", "")),
+                )
+                if group_key not in grouped:
+                    copied = dict(item)
+                    copied["times"] = []
+                    grouped[group_key] = copied
+                grouped[group_key]["times"].append(dict(time_info))
+
+            new_schedules = list(grouped.values())
+            logger.info(f"[{name}] 새 IMAX 회차 {len(new_keys)}개 감지!")
+            result_info["changed"] = True
+
+            msg = crawler.format_message(new_schedules) if new_schedules else None
+            if msg:
+                result_info["msg"] = msg
+                result_info["keyboard"] = self._build_keyboard(watcher, "")
+                if send_alert:
+                    await self._send_alert(msg, context, result_info["keyboard"])
+
+            return result_info
+
+        # 일반 웹 감시는 기존 해시 비교 사용
         if not self.state_mgr.has_changed(name, raw_data):
             logger.debug(f"[{name}] 변경 없음")
             return result_info
