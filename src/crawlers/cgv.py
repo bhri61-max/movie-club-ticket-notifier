@@ -227,11 +227,11 @@ class CGVCrawler:
 
     def _check_mobile_html(self):
         """
-        CGV 모바일 상영시간표 HTML을 직접 파싱한다.
+        CGV 모바일 HTML 상영시간표 파싱.
 
-        오래 검증된 CGV 구조는 ul.timelist > li 안의 popupSchedule(...)
-        호출에 영화명, 관명, 시작시간이 들어간다. 링크(a)만 보지 않고 li 전체를
-        읽어 현재 구조 변화에도 대응한다.
+        현재 응답은 ul.timelist 구조가 아니라 Btn_lightGrey 링크 안의
+        popupSchedule(...) 인수에 영화명/관명/상영시간을 넣는 경우가 있어
+        두 구조를 모두 지원한다.
         """
         import requests
         from bs4 import BeautifulSoup
@@ -267,63 +267,61 @@ class CGVCrawler:
                 text = resp.text or ""
                 raw_parts.append(
                     f"[{date_str}]html-status={resp.status_code};len={len(text)};"
-                    + text[:12000]
+                    + text[:16000]
                 )
 
                 if resp.status_code != 200 or not text:
                     continue
 
                 soup = BeautifulSoup(text, "html.parser")
-                schedule_items = []
-                for ul in soup.find_all("ul", class_="timelist"):
-                    schedule_items.extend(ul.find_all("li"))
 
+                # 현재 CGV 모바일 구조에서 상영회차 링크 후보
+                buttons = soup.select(".Btn_lightGrey")
+                timelist_items = []
+                for ul in soup.find_all("ul", class_="timelist"):
+                    timelist_items.extend(ul.find_all("li"))
+
+                popup_count = len(re.findall(r"popupSchedule\(", text, re.I))
                 logger.info(
-                    f"CGV HTML {date_str}: timelist 항목 {len(schedule_items)}개, "
+                    f"CGV HTML {date_str}: Btn_lightGrey {len(buttons)}개, "
+                    f"timelist {len(timelist_items)}개, popupSchedule {popup_count}개, "
                     f"오디세이={'Y' if '오디세이' in text else 'N'}, "
                     f"아이맥스={'Y' if '아이맥스' in text else 'N'}, "
-                    f"IMAX={'Y' if 'IMAX' in text.upper() else 'N'}"
+                    f"IMAX={'Y' if 'IMAX' in text.upper() else 'N'}, "
+                    f"6관={'Y' if '6관' in text else 'N'}"
                 )
+
+                # 오디세이가 응답 어디에 있는지 진단용 짧은 문맥 출력
+                odi_pos = text.find("오디세이")
+                if odi_pos >= 0:
+                    snippet = re.sub(r"\s+", " ", text[max(0, odi_pos-250):odi_pos+700])
+                    logger.info(f"CGV HTML {date_str}: 오디세이 문맥 -> {snippet[:900]}")
 
                 grouped = {}
                 target_samples = []
 
-                for li in schedule_items:
-                    raw = str(li)
-                    visible = li.get_text(" ", strip=True)
+                # 1) Btn_lightGrey 구조
+                for el in buttons:
+                    href = (el.get("href") or "") + " " + (el.get("onclick") or "")
+                    parts = href.split("'")
+                    if len(parts) < 10:
+                        continue
 
-                    # popupSchedule('영화명','관명','HH:MM', ...) 형태
-                    m = re.search(
-                        r"popupSchedule\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,"
-                        r"\s*'(\d{1,2}:\d{2})'",
-                        raw,
-                        re.I,
-                    )
-
-                    if m:
-                        movie = m.group(1).strip()
-                        hall = m.group(2).strip()
-                        start_time = m.group(3).strip()
-                    else:
-                        # 구조가 조금 달라도 따옴표 인수 3개를 보강 추출
-                        args = re.findall(r"'([^']*)'", raw)
-                        if len(args) < 3:
-                            continue
-                        movie = args[0].strip()
-                        hall = args[1].strip()
-                        start_time = args[2].strip()
+                    # 공개 CGV 모바일 파서에서 검증된 인덱스
+                    movie = parts[1].strip()
+                    hall = parts[3].strip()
+                    start_time = parts[5].strip()
+                    visible = el.get_text(" ", strip=True)
 
                     if self._wanted_movie(movie) and len(target_samples) < 10:
                         target_samples.append(
-                            f"{movie}|{hall}|{start_time}|{visible[:80]}"
+                            f"BTN:{movie}|{hall}|{start_time}|{visible[:80]}"
                         )
 
                     if not self._wanted_movie(movie):
                         continue
 
-                    # 광교 IMAX는 응답에서 '아이맥스', 'IMAX', 또는 '6관'으로
-                    # 표기될 수 있으므로 li 전체와 관명을 함께 판정한다.
-                    hall_blob = f"{hall} {visible} {raw}"
+                    hall_blob = f"{hall} {visible} {href}"
                     if not self._wanted_hall(hall_blob):
                         continue
 
@@ -331,19 +329,58 @@ class CGVCrawler:
                         continue
 
                     key = (movie, hall or "광교 IMAX")
-                    if key not in grouped:
-                        grouped[key] = {
+                    grouped.setdefault(
+                        key,
+                        {
                             "movie": movie,
                             "hall": hall or "광교 IMAX",
                             "times": [],
                             "date": date_display,
                             "date_raw": date_str,
-                        }
-
-                    if start_time not in [
-                        t["start"] for t in grouped[key]["times"]
-                    ]:
+                        },
+                    )
+                    if start_time not in [t["start"] for t in grouped[key]["times"]]:
                         grouped[key]["times"].append({"start": start_time})
+
+                # 2) popupSchedule이 다른 태그/스크립트에 있는 구조
+                if not grouped:
+                    for m in re.finditer(
+                        r"popupSchedule\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,"
+                        r"\s*'(\d{1,2}:\d{2})'",
+                        text,
+                        re.I,
+                    ):
+                        movie = m.group(1).strip()
+                        hall = m.group(2).strip()
+                        start_time = m.group(3).strip()
+
+                        if self._wanted_movie(movie) and len(target_samples) < 10:
+                            target_samples.append(
+                                f"REGEX:{movie}|{hall}|{start_time}"
+                            )
+
+                        if not self._wanted_movie(movie):
+                            continue
+
+                        # 매치 주변의 HTML에 아이맥스/IMAX/6관 표시가 있는지도 함께 본다.
+                        near = text[max(0, m.start()-800):m.end()+800]
+                        hall_blob = f"{hall} {near}"
+                        if not self._wanted_hall(hall_blob):
+                            continue
+
+                        key = (movie, hall or "광교 IMAX")
+                        grouped.setdefault(
+                            key,
+                            {
+                                "movie": movie,
+                                "hall": hall or "광교 IMAX",
+                                "times": [],
+                                "date": date_display,
+                                "date_raw": date_str,
+                            },
+                        )
+                        if start_time not in [t["start"] for t in grouped[key]["times"]]:
+                            grouped[key]["times"].append({"start": start_time})
 
                 if target_samples:
                     logger.info(
