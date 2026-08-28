@@ -19,6 +19,7 @@ watchers:
 
       hall_keywords:
         - "IMAX"
+        - "아이맥스"
         - "6관"
 
       movie_keywords:
