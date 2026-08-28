@@ -226,14 +226,26 @@ class CGVCrawler:
         return self._dedupe(all_schedules), raw_parts
 
     def _check_mobile_html(self):
+        """
+        CGV 모바일 상영시간표 HTML을 직접 파싱한다.
+
+        오래 검증된 CGV 구조는 ul.timelist > li 안의 popupSchedule(...)
+        호출에 영화명, 관명, 시작시간이 들어간다. 링크(a)만 보지 않고 li 전체를
+        읽어 현재 구조 변화에도 대응한다.
+        """
         import requests
         from bs4 import BeautifulSoup
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36",
-            "Referer": f"https://m.cgv.co.kr/WebAPP/TheaterV4/TheaterDetail.aspx?tc={self.theater_code}",
-            "X-Requested-With": "XMLHttpRequest",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 14; Mobile) "
+                "AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36"
+            ),
+            "Referer": (
+                f"https://m.cgv.co.kr/WebAPP/TheaterV4/"
+                f"TheaterDetail.aspx?tc={self.theater_code}"
+            ),
+            "Content-Type": "application/x-www-form-urlencoded",
         }
 
         all_schedules = []
@@ -254,62 +266,96 @@ class CGVCrawler:
                 )
                 text = resp.text or ""
                 raw_parts.append(
-                    f"[{date_str}]html-status={resp.status_code};len={len(text)};" + text[:5000]
+                    f"[{date_str}]html-status={resp.status_code};len={len(text)};"
+                    + text[:12000]
                 )
 
                 if resp.status_code != 200 or not text:
                     continue
 
                 soup = BeautifulSoup(text, "html.parser")
+                schedule_items = []
+                for ul in soup.find_all("ul", class_="timelist"):
+                    schedule_items.extend(ul.find_all("li"))
+
+                logger.info(
+                    f"CGV HTML {date_str}: timelist 항목 {len(schedule_items)}개, "
+                    f"오디세이={'Y' if '오디세이' in text else 'N'}, "
+                    f"아이맥스={'Y' if '아이맥스' in text else 'N'}, "
+                    f"IMAX={'Y' if 'IMAX' in text.upper() else 'N'}"
+                )
+
                 grouped = {}
                 target_samples = []
 
-                for a in soup.find_all("a"):
-                    js = (a.get("href") or "") + " " + (a.get("onclick") or "")
-                    if "popupSchedule" not in js:
-                        continue
+                for li in schedule_items:
+                    raw = str(li)
+                    visible = li.get_text(" ", strip=True)
 
-                    args = re.findall(r"'([^']*)'", js)
-                    if len(args) < 3:
-                        continue
+                    # popupSchedule('영화명','관명','HH:MM', ...) 형태
+                    m = re.search(
+                        r"popupSchedule\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,"
+                        r"\s*'(\d{1,2}:\d{2})'",
+                        raw,
+                        re.I,
+                    )
 
-                    movie = args[0].strip()
-                    hall = args[1].strip()
-                    start_time = args[2].strip()
+                    if m:
+                        movie = m.group(1).strip()
+                        hall = m.group(2).strip()
+                        start_time = m.group(3).strip()
+                    else:
+                        # 구조가 조금 달라도 따옴표 인수 3개를 보강 추출
+                        args = re.findall(r"'([^']*)'", raw)
+                        if len(args) < 3:
+                            continue
+                        movie = args[0].strip()
+                        hall = args[1].strip()
+                        start_time = args[2].strip()
 
-                    if self._wanted_movie(movie) and len(target_samples) < 8:
-                        target_samples.append(f"{movie}|{hall}|{start_time}")
+                    if self._wanted_movie(movie) and len(target_samples) < 10:
+                        target_samples.append(
+                            f"{movie}|{hall}|{start_time}|{visible[:80]}"
+                        )
 
                     if not self._wanted_movie(movie):
                         continue
-                    if not self._wanted_hall(hall):
+
+                    # 광교 IMAX는 응답에서 '아이맥스', 'IMAX', 또는 '6관'으로
+                    # 표기될 수 있으므로 li 전체와 관명을 함께 판정한다.
+                    hall_blob = f"{hall} {visible} {raw}"
+                    if not self._wanted_hall(hall_blob):
                         continue
+
                     if not re.fullmatch(r"[0-2]?\d:[0-5]\d", start_time):
                         continue
 
-                    key = (movie, hall)
-                    grouped.setdefault(
-                        key,
-                        {
+                    key = (movie, hall or "광교 IMAX")
+                    if key not in grouped:
+                        grouped[key] = {
                             "movie": movie,
-                            "hall": hall,
+                            "hall": hall or "광교 IMAX",
                             "times": [],
                             "date": date_display,
                             "date_raw": date_str,
-                        },
-                    )
-                    if start_time not in [t["start"] for t in grouped[key]["times"]]:
+                        }
+
+                    if start_time not in [
+                        t["start"] for t in grouped[key]["times"]
+                    ]:
                         grouped[key]["times"].append({"start": start_time})
 
                 if target_samples:
                     logger.info(
-                        f"CGV HTML {date_str}: 대상 영화 후보 " + " || ".join(target_samples)
+                        f"CGV HTML {date_str}: 오디세이 후보 -> "
+                        + " || ".join(target_samples)
                     )
 
                 day_results = list(grouped.values())
                 if day_results:
                     logger.info(
-                        f"CGV HTML {date_str}: 오디세이/광교IMAX {len(day_results)}건 발견"
+                        f"CGV HTML {date_str}: 오디세이 IMAX "
+                        f"{len(day_results)}건 발견"
                     )
                     all_schedules.extend(day_results)
 
