@@ -35,32 +35,27 @@ class CGVCrawler:
         return any(k in up for k in self.hall_keywords)
 
     def check(self) -> dict:
-        schedules, raw_parts = self._check_mobile_json()
+        # 현재 CGV 환경에서는 모바일 HTML 응답이 실제 상영정보를 안정적으로 반환한다.
+        schedules, raw_parts = self._check_mobile_html()
         if schedules:
-            logger.info(f"CGV JSON 조회 성공: 매칭 일정 {len(schedules)}건")
+            logger.info(f"CGV 모바일 HTML 조회 성공: 매칭 일정 {len(schedules)}건")
             return {"schedules": schedules, "raw_data": "\n".join(raw_parts)}
 
-        logger.warning("CGV JSON 조회에서 매칭 0건. 모바일 HTML fallback 시도")
-        s2, r2 = self._check_mobile_html()
-        if s2:
-            logger.info(f"CGV 모바일 HTML 조회 성공: 매칭 일정 {len(s2)}건")
-            return {"schedules": s2, "raw_data": "\n".join(raw_parts + r2)}
-
-        logger.warning("CGV 모바일 HTML 조회에서도 매칭 0건. Selenium fallback 시도")
+        logger.warning("CGV 모바일 HTML 조회에서 매칭 0건. Selenium fallback 시도")
         driver = self._get_driver()
         if not driver:
-            return {"schedules": [], "raw_data": "\n".join(raw_parts + r2) or "driver-error"}
+            return {"schedules": [], "raw_data": "\n".join(raw_parts) or "driver-error"}
 
         try:
-            s3, r3 = self._check_with_selenium(driver)
-            logger.info(f"CGV Selenium 검사 완료: 매칭 일정 {len(s3)}건")
-            return {"schedules": s3, "raw_data": "\n".join(raw_parts + r2 + r3)}
+            s2, r2 = self._check_with_selenium(driver)
+            logger.info(f"CGV Selenium 검사 완료: 매칭 일정 {len(s2)}건")
+            return {"schedules": s2, "raw_data": "\n".join(raw_parts + r2)}
         except Exception as e:
             logger.error(f"Selenium 크롤링 실패: {e}")
             self.close()
             return {
                 "schedules": [],
-                "raw_data": "\n".join(raw_parts + r2 + [f"error:{e}"]),
+                "raw_data": "\n".join(raw_parts + [f"error:{e}"]),
             }
 
     def _check_mobile_json(self):
@@ -267,6 +262,7 @@ class CGVCrawler:
 
                 soup = BeautifulSoup(text, "html.parser")
                 grouped = {}
+                target_samples = []
 
                 for a in soup.find_all("a"):
                     js = (a.get("href") or "") + " " + (a.get("onclick") or "")
@@ -280,6 +276,9 @@ class CGVCrawler:
                     movie = args[0].strip()
                     hall = args[1].strip()
                     start_time = args[2].strip()
+
+                    if self._wanted_movie(movie) and len(target_samples) < 8:
+                        target_samples.append(f"{movie}|{hall}|{start_time}")
 
                     if not self._wanted_movie(movie):
                         continue
@@ -302,7 +301,17 @@ class CGVCrawler:
                     if start_time not in [t["start"] for t in grouped[key]["times"]]:
                         grouped[key]["times"].append({"start": start_time})
 
-                all_schedules.extend(grouped.values())
+                if target_samples:
+                    logger.info(
+                        f"CGV HTML {date_str}: 대상 영화 후보 " + " || ".join(target_samples)
+                    )
+
+                day_results = list(grouped.values())
+                if day_results:
+                    logger.info(
+                        f"CGV HTML {date_str}: 오디세이/광교IMAX {len(day_results)}건 발견"
+                    )
+                    all_schedules.extend(day_results)
 
             except Exception as e:
                 logger.warning(f"CGV 모바일 HTML {date_str} 조회 실패: {e}")
