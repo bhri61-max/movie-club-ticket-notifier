@@ -16,6 +16,8 @@ watchers:
       theater_code: "0257"
       area_code: "12"
       days_ahead: 14
+      # 2026-09-09 이후 새로 생기는 IMAX 회차만 알림
+      notify_from_date: "20260909"
 
       hall_keywords:
         - "IMAX"
