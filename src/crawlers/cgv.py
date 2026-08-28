@@ -1,30 +1,46 @@
 """
 CGV 상영 일정 크롤러
-- 1순위: CGV 모바일 JSON 상영시간 API 직접 조회
-- 2순위: 구형 모바일 HTML 응답 조회
-- 3순위: Selenium 화면 파싱 fallback
+- 2026년 신 CGV 공개 JSON API 사용
+- 광교(0257)에서 오디세이 + IMAX 상영회차를 직접 조회
 """
 
 import json
-import re
 import logging
-from datetime import datetime, timedelta
 from collections import defaultdict
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-MOBILE_JSON_URL = "https://m.cgv.co.kr/WebAPP/Reservation/Common/ajaxTheaterScheduleList.aspx/GetTheaterScheduleList"
-MOBILE_HTML_URL = "https://m.cgv.co.kr/Schedule/cont/ajaxMovieSchedule.aspx"
+API_URL = (
+    "https://cgv.co.kr/api/v1/booking/searchMovScnInfo"
+    "?coCd=A420&siteNo={site}&scnYmd={ymd}&rtctlScopCd=08"
+)
+BOOKING_URL = "https://cgv.co.kr/cnm/movieBook/cinema"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ko-KR,ko;q=0.9",
+    "Referer": BOOKING_URL,
+}
 
 
 class CGVCrawler:
     def __init__(self, settings: dict):
-        self.theater_code = settings.get("theater_code", "0013")
-        self.area_code = settings.get("area_code", "01")
+        self.theater_code = settings.get("theater_code", "0257")
+        self.area_code = settings.get("area_code", "12")
         self.days_ahead = settings.get("days_ahead", 14)
-        self.hall_keywords = [kw.upper() for kw in settings.get("hall_keywords", ["IMAX"])]
-        self.movie_keywords = [kw.upper() for kw in settings.get("movie_keywords", [])]
-        self._driver = None
+        self.hall_keywords = [
+            kw.upper() for kw in settings.get("hall_keywords", ["IMAX"])
+        ]
+        self.movie_keywords = [
+            kw.upper() for kw in settings.get("movie_keywords", ["오디세이"])
+        ]
 
     def _wanted_movie(self, text: str) -> bool:
         up = (text or "").upper()
@@ -35,497 +51,172 @@ class CGVCrawler:
         return any(k in up for k in self.hall_keywords)
 
     def check(self) -> dict:
-        # 현재 CGV 환경에서는 모바일 HTML 응답이 실제 상영정보를 안정적으로 반환한다.
-        schedules, raw_parts = self._check_mobile_html()
-        if schedules:
-            logger.info(f"CGV 모바일 HTML 조회 성공: 매칭 일정 {len(schedules)}건")
-            return {"schedules": schedules, "raw_data": "\n".join(raw_parts)}
-
-        logger.warning("CGV 모바일 HTML 조회에서 매칭 0건. Selenium fallback 시도")
-        driver = self._get_driver()
-        if not driver:
-            return {"schedules": [], "raw_data": "\n".join(raw_parts) or "driver-error"}
-
-        try:
-            s2, r2 = self._check_with_selenium(driver)
-            logger.info(f"CGV Selenium 검사 완료: 매칭 일정 {len(s2)}건")
-            return {"schedules": s2, "raw_data": "\n".join(raw_parts + r2)}
-        except Exception as e:
-            logger.error(f"Selenium 크롤링 실패: {e}")
-            self.close()
-            return {
-                "schedules": [],
-                "raw_data": "\n".join(raw_parts + [f"error:{e}"]),
-            }
-
-    def _check_mobile_json(self):
         import requests
 
-        headers = {
-            "Cache-Control": "no-cache",
-            "Accept": "application/json",
-            "Content-Type": "application/json; charset=UTF-8",
-            "Origin": "https://m.cgv.co.kr",
-            "Referer": "https://m.cgv.co.kr/",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-        }
-
-        all_schedules = []
-        raw_parts = []
-        today = datetime.now()
+        schedules = []
+        raw_rows = []
+        today = datetime.now(ZoneInfo("Asia/Seoul")).date()
 
         for i in range(self.days_ahead + 1):
-            target_date = today + timedelta(days=i)
-            date_str = target_date.strftime("%Y%m%d")
-            date_display = target_date.strftime("%Y-%m-%d (%a)")
+            d = today + timedelta(days=i)
+            ymd = d.strftime("%Y%m%d")
+            date_display = d.strftime("%Y-%m-%d")
 
-            payload = {
-                "strRequestType": "THEATER",
-                "strUserID": "",
-                "strMovieGroupCd": "",
-                "strMovieTypeCd": "",
-                "strPlayYMD": date_str,
-                "strTheaterCd": self.theater_code,
-                "strScreenTypeCd": "",
-                "strRankType": "MOVIE",
-            }
+            url = API_URL.format(site=self.theater_code, ymd=ymd)
 
             try:
-                resp = requests.post(
-                    MOBILE_JSON_URL,
-                    json=payload,
-                    headers=headers,
-                    timeout=20,
-                )
+                resp = requests.get(url, headers=HEADERS, timeout=20)
+                text = resp.text or ""
 
-                logger.info(
-                    f"CGV JSON {date_str}: HTTP {resp.status_code}, 응답 {len(resp.text or '')}자"
-                )
-
-                if resp.status_code != 200 or not resp.text:
-                    raw_parts.append(
-                        f"[{date_str}]json-status={resp.status_code};len={len(resp.text or '')}"
+                if resp.status_code != 200:
+                    logger.warning(
+                        f"CGV API {ymd}: HTTP {resp.status_code}, 응답 {len(text)}자"
+                    )
+                    raw_rows.append(
+                        {"date": ymd, "http": resp.status_code, "error": text[:200]}
                     )
                     continue
 
-                outer = resp.json()
-                inner = outer.get("d", outer)
-                if isinstance(inner, str):
-                    data = json.loads(inner)
-                else:
-                    data = inner
+                if text.lstrip().startswith("<"):
+                    logger.warning(f"CGV API {ymd}: HTML 차단 응답")
+                    raw_rows.append({"date": ymd, "blocked": True})
+                    continue
 
-                result_code = str(data.get("ResultCode", ""))
-                result_schedule = data.get("ResultSchedule") or {}
-                tables = result_schedule.get("ScheduleList") or []
+                try:
+                    payload = resp.json()
+                except Exception as e:
+                    logger.warning(f"CGV API {ymd}: JSON 해석 실패: {e}")
+                    raw_rows.append({"date": ymd, "json_error": str(e)})
+                    continue
 
-                logger.info(
-                    f"CGV JSON {date_str}: ResultCode={result_code}, 전체 상영 {len(tables)}건"
-                )
+                rows = payload.get("data") or []
+                if not isinstance(rows, list):
+                    rows = []
 
-                # 디버깅: 오디세이 일정이 API에 실제로 있는지, 어떤 관명/속성으로 오는지 확인
-                movie_rows = []
-                for row in tables:
-                    movie_name = str(row.get("MovieNmKor", "") or "")
-                    if self._wanted_movie(movie_name):
-                        movie_rows.append(row)
-
-                if movie_rows:
-                    samples = []
-                    for row in movie_rows[:5]:
-                        samples.append(
-                            f"{row.get('MovieNmKor','')}|"
-                            f"ScreenNm={row.get('ScreenNm','')}|"
-                            f"MovieAttrNm={row.get('MovieAttrNm','')}|"
-                            f"ScreenRatingCd={row.get('ScreenRatingCd','')}|"
-                            f"PlayStartTm={row.get('PlayStartTm','')}"
-                        )
-                    logger.info(
-                        f"CGV JSON {date_str}: 대상 영화 {len(movie_rows)}건 / "
-                        + " || ".join(samples)
-                    )
-                else:
-                    logger.info(f"CGV JSON {date_str}: 대상 영화 0건")
+                logger.info(f"CGV API {ymd}: 전체 상영 {len(rows)}건")
 
                 grouped = {}
-                for row in movie_rows:
-                    movie = str(row.get("MovieNmKor", "") or "").strip()
-                    screen = str(row.get("ScreenNm", "") or "").strip()
-                    attr = str(row.get("MovieAttrNm", "") or "").strip()
-                    start_raw = str(row.get("PlayStartTm", "") or "").strip()
+                odi_count = 0
+                imax_count = 0
 
-                    # IMAX 표기가 ScreenNm이 아닌 다른 필드에 들어오는 경우까지 포함
-                    scalar_text = " ".join(
-                        str(v)
-                        for v in row.values()
-                        if isinstance(v, (str, int, float, bool)) and v is not None
-                    )
-                    if not self._wanted_hall(scalar_text):
+                for r in rows:
+                    mov = (
+                        str(r.get("movNm") or "")
+                        + " "
+                        + str(r.get("expoProdNm") or "")
+                    ).strip()
+
+                    scr = (
+                        str(r.get("scnsNm") or "")
+                        + " "
+                        + str(r.get("movkndDsplNm") or "")
+                    ).strip()
+
+                    start = str(r.get("scnsrtTm") or "").strip()
+
+                    if self._wanted_movie(mov):
+                        odi_count += 1
+                    if self._wanted_hall(scr):
+                        imax_count += 1
+
+                    if not self._wanted_movie(mov):
+                        continue
+                    if not self._wanted_hall(scr):
+                        continue
+                    if len(start) < 4:
                         continue
 
-                    # 0930 / 09:30 모두 처리
-                    digits = re.sub(r"\D", "", start_raw)
-                    if len(digits) >= 4:
-                        start_time = f"{digits[-4:-2]}:{digits[-2:]}"
-                    else:
-                        m = re.search(r"([0-2]?\d):([0-5]\d)", start_raw)
-                        if not m:
-                            continue
-                        start_time = f"{int(m.group(1)):02d}:{m.group(2)}"
+                    digits = "".join(ch for ch in start if ch.isdigit())
+                    if len(digits) < 4:
+                        continue
+                    digits = digits[-4:]
+                    start_time = f"{digits[:2]}:{digits[2:]}"
 
-                    hall = screen or attr or "IMAX"
-                    if attr and attr.upper() not in hall.upper():
-                        hall = f"{hall} {attr}".strip()
+                    screen_name = str(r.get("scnsNm") or "").strip()
+                    kind_name = str(r.get("movkndDsplNm") or "").strip()
+                    hall = " ".join(x for x in [screen_name, kind_name] if x).strip()
+                    if not hall:
+                        hall = "IMAX"
 
-                    key = (movie, hall)
+                    key = (mov, hall)
                     if key not in grouped:
                         grouped[key] = {
-                            "movie": movie,
+                            "movie": mov,
                             "hall": hall,
                             "times": [],
                             "date": date_display,
-                            "date_raw": date_str,
+                            "date_raw": ymd,
                         }
+
+                    time_entry = {"start": start_time}
+                    free = r.get("frSeatCnt")
+                    total = r.get("stcnt")
+                    if free is not None:
+                        time_entry["free"] = free
+                    if total is not None:
+                        time_entry["total"] = total
+
                     if start_time not in [t["start"] for t in grouped[key]["times"]]:
-                        grouped[key]["times"].append({"start": start_time})
+                        grouped[key]["times"].append(time_entry)
 
                 day_results = list(grouped.values())
-                if day_results:
-                    logger.info(
-                        f"CGV JSON {date_str}: 오디세이 IMAX {len(day_results)}건 발견"
-                    )
-                    all_schedules.extend(day_results)
 
-                # 상태 해시는 전체 응답이 아니라 의미 있는 일정 데이터 기준
-                raw_parts.append(
-                    f"[{date_str}]code={result_code};count={len(tables)};"
-                    + json.dumps(
-                        [
+                logger.info(
+                    f"CGV API {ymd}: 오디세이 후보 {odi_count}건, "
+                    f"IMAX 후보 {imax_count}건, 최종 매칭 {len(day_results)}건"
+                )
+
+                if day_results:
+                    sample = []
+                    for item in day_results[:3]:
+                        sample.append(
+                            f"{item['movie']} | {item['hall']} | "
+                            + ",".join(t["start"] for t in item["times"])
+                        )
+                    logger.info(
+                        f"CGV API {ymd}: 오디세이 IMAX 발견 -> "
+                        + " || ".join(sample)
+                    )
+                    schedules.extend(day_results)
+
+                raw_rows.append(
+                    {
+                        "date": ymd,
+                        "match": [
                             {
-                                "movie": r.get("MovieNmKor", ""),
-                                "screen": r.get("ScreenNm", ""),
-                                "attr": r.get("MovieAttrNm", ""),
-                                "time": r.get("PlayStartTm", ""),
-                                "sale": r.get("AllowSaleYn", ""),
+                                "movie": item["movie"],
+                                "hall": item["hall"],
+                                "times": [t["start"] for t in item["times"]],
                             }
-                            for r in tables
+                            for item in day_results
                         ],
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    )[:20000]
+                    }
                 )
 
             except Exception as e:
-                logger.warning(f"CGV JSON {date_str} 조회 실패: {e}")
-                raw_parts.append(f"[{date_str}]json-error:{e}")
+                logger.warning(f"CGV API {ymd} 조회 실패: {e}")
+                raw_rows.append({"date": ymd, "exception": str(e)})
 
-        return self._dedupe(all_schedules), raw_parts
+        logger.info(f"CGV 검사 완료: 오디세이 IMAX 매칭 총 {len(schedules)}건")
 
-    def _check_mobile_html(self):
-        """
-        CGV 모바일 HTML 상영시간표 파싱.
-
-        현재 응답은 ul.timelist 구조가 아니라 Btn_lightGrey 링크 안의
-        popupSchedule(...) 인수에 영화명/관명/상영시간을 넣는 경우가 있어
-        두 구조를 모두 지원한다.
-        """
-        import requests
-        from bs4 import BeautifulSoup
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 14; Mobile) "
-                "AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36"
-            ),
-            "Referer": (
-                f"https://m.cgv.co.kr/WebAPP/TheaterV4/"
-                f"TheaterDetail.aspx?tc={self.theater_code}"
-            ),
-            "Content-Type": "application/x-www-form-urlencoded",
+        return {
+            "schedules": schedules,
+            "raw_data": json.dumps(raw_rows, ensure_ascii=False, sort_keys=True),
         }
 
-        all_schedules = []
-        raw_parts = []
-        today = datetime.now()
-
-        for i in range(self.days_ahead + 1):
-            target_date = today + timedelta(days=i)
-            date_str = target_date.strftime("%Y%m%d")
-            date_display = target_date.strftime("%Y-%m-%d (%a)")
-
-            try:
-                resp = requests.post(
-                    MOBILE_HTML_URL,
-                    data={"theaterCd": self.theater_code, "playYMD": date_str},
-                    headers=headers,
-                    timeout=20,
-                )
-                text = resp.text or ""
-                raw_parts.append(
-                    f"[{date_str}]html-status={resp.status_code};len={len(text)};"
-                    + text[:16000]
-                )
-
-                if resp.status_code != 200 or not text:
-                    continue
-
-                soup = BeautifulSoup(text, "html.parser")
-
-                # 현재 CGV 모바일 구조에서 상영회차 링크 후보
-                buttons = soup.select(".Btn_lightGrey")
-                timelist_items = []
-                for ul in soup.find_all("ul", class_="timelist"):
-                    timelist_items.extend(ul.find_all("li"))
-
-                popup_count = len(re.findall(r"popupSchedule\(", text, re.I))
-                logger.info(
-                    f"CGV HTML {date_str}: Btn_lightGrey {len(buttons)}개, "
-                    f"timelist {len(timelist_items)}개, popupSchedule {popup_count}개, "
-                    f"오디세이={'Y' if '오디세이' in text else 'N'}, "
-                    f"아이맥스={'Y' if '아이맥스' in text else 'N'}, "
-                    f"IMAX={'Y' if 'IMAX' in text.upper() else 'N'}, "
-                    f"6관={'Y' if '6관' in text else 'N'}"
-                )
-
-                # 오디세이가 응답 어디에 있는지 진단용 짧은 문맥 출력
-                odi_pos = text.find("오디세이")
-                if odi_pos >= 0:
-                    snippet = re.sub(r"\s+", " ", text[max(0, odi_pos-250):odi_pos+700])
-                    logger.info(f"CGV HTML {date_str}: 오디세이 문맥 -> {snippet[:900]}")
-
-                grouped = {}
-                target_samples = []
-
-                # 1) Btn_lightGrey 구조
-                for el in buttons:
-                    href = (el.get("href") or "") + " " + (el.get("onclick") or "")
-                    parts = href.split("'")
-                    if len(parts) < 10:
-                        continue
-
-                    # 공개 CGV 모바일 파서에서 검증된 인덱스
-                    movie = parts[1].strip()
-                    hall = parts[3].strip()
-                    start_time = parts[5].strip()
-                    visible = el.get_text(" ", strip=True)
-
-                    if self._wanted_movie(movie) and len(target_samples) < 10:
-                        target_samples.append(
-                            f"BTN:{movie}|{hall}|{start_time}|{visible[:80]}"
-                        )
-
-                    if not self._wanted_movie(movie):
-                        continue
-
-                    hall_blob = f"{hall} {visible} {href}"
-                    if not self._wanted_hall(hall_blob):
-                        continue
-
-                    if not re.fullmatch(r"[0-2]?\d:[0-5]\d", start_time):
-                        continue
-
-                    key = (movie, hall or "광교 IMAX")
-                    grouped.setdefault(
-                        key,
-                        {
-                            "movie": movie,
-                            "hall": hall or "광교 IMAX",
-                            "times": [],
-                            "date": date_display,
-                            "date_raw": date_str,
-                        },
-                    )
-                    if start_time not in [t["start"] for t in grouped[key]["times"]]:
-                        grouped[key]["times"].append({"start": start_time})
-
-                # 2) popupSchedule이 다른 태그/스크립트에 있는 구조
-                if not grouped:
-                    for m in re.finditer(
-                        r"popupSchedule\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,"
-                        r"\s*'(\d{1,2}:\d{2})'",
-                        text,
-                        re.I,
-                    ):
-                        movie = m.group(1).strip()
-                        hall = m.group(2).strip()
-                        start_time = m.group(3).strip()
-
-                        if self._wanted_movie(movie) and len(target_samples) < 10:
-                            target_samples.append(
-                                f"REGEX:{movie}|{hall}|{start_time}"
-                            )
-
-                        if not self._wanted_movie(movie):
-                            continue
-
-                        # 매치 주변의 HTML에 아이맥스/IMAX/6관 표시가 있는지도 함께 본다.
-                        near = text[max(0, m.start()-800):m.end()+800]
-                        hall_blob = f"{hall} {near}"
-                        if not self._wanted_hall(hall_blob):
-                            continue
-
-                        key = (movie, hall or "광교 IMAX")
-                        grouped.setdefault(
-                            key,
-                            {
-                                "movie": movie,
-                                "hall": hall or "광교 IMAX",
-                                "times": [],
-                                "date": date_display,
-                                "date_raw": date_str,
-                            },
-                        )
-                        if start_time not in [t["start"] for t in grouped[key]["times"]]:
-                            grouped[key]["times"].append({"start": start_time})
-
-                if target_samples:
-                    logger.info(
-                        f"CGV HTML {date_str}: 오디세이 후보 -> "
-                        + " || ".join(target_samples)
-                    )
-
-                day_results = list(grouped.values())
-                if day_results:
-                    logger.info(
-                        f"CGV HTML {date_str}: 오디세이 IMAX "
-                        f"{len(day_results)}건 발견"
-                    )
-                    all_schedules.extend(day_results)
-
-            except Exception as e:
-                logger.warning(f"CGV 모바일 HTML {date_str} 조회 실패: {e}")
-                raw_parts.append(f"[{date_str}]html-error:{e}")
-
-        return self._dedupe(all_schedules), raw_parts
-
-    def _get_driver(self):
-        if self._driver is not None:
-            return self._driver
-        try:
-            import os
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.chrome.service import Service
-
-            options = Options()
-            options.add_argument("--headless=new")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1920,1080")
-            options.add_argument("--disable-blink-features=AutomationControlled")
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            options.add_experimental_option("useAutomationExtension", False)
-
-            chrome_path = os.environ.get("CHROME_PATH")
-            if chrome_path:
-                options.binary_location = chrome_path
-            driver_path = os.environ.get("CHROMEDRIVER_PATH")
-            service = Service(driver_path) if driver_path else Service()
-
-            self._driver = webdriver.Chrome(service=service, options=options)
-            self._driver.execute_cdp_cmd(
-                "Page.addScriptToEvaluateOnNewDocument",
-                {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
-            )
-            return self._driver
-        except Exception as e:
-            logger.error(f"Selenium WebDriver 생성 실패: {e}")
-            return None
-
-    def _check_with_selenium(self, driver):
-        import time
-
-        schedules = []
-        raw_parts = []
-        today = datetime.now()
-
-        for i in range(self.days_ahead + 1):
-            target_date = today + timedelta(days=i)
-            date_str = target_date.strftime("%Y%m%d")
-            date_display = target_date.strftime("%Y-%m-%d (%a)")
-            url = (
-                f"https://www.cgv.co.kr/reserve/show-times/?areacode={self.area_code}"
-                f"&theaterCode={self.theater_code}&date={date_str}"
-            )
-            try:
-                driver.get(url)
-                time.sleep(3)
-                visible = driver.find_element("tag name", "body").text
-                raw_parts.append(f"[{date_str}]selenium:" + visible[:12000])
-                parsed = self._parse_text_fallback(visible, date_display, date_str)
-                schedules.extend(parsed)
-            except Exception as e:
-                logger.warning(f"Selenium 날짜 {date_str} 조회 실패: {e}")
-
-        return self._dedupe(schedules), raw_parts
-
-    def _parse_text_fallback(self, text: str, date_display: str, date_raw: str):
-        lines = [re.sub(r"\s+", " ", x).strip() for x in text.splitlines() if x.strip()]
-        results = []
-
-        for i, line in enumerate(lines):
-            if not self._wanted_movie(line):
-                continue
-            block_lines = lines[max(0, i - 5): min(len(lines), i + 50)]
-            block = " | ".join(block_lines)
-            if not self._wanted_hall(block):
-                continue
-
-            times = []
-            for t in re.findall(r"(?<!\d)([0-2]?\d:[0-5]\d)(?!\d)", block):
-                if t not in times:
-                    times.append(t)
-            if not times:
-                continue
-
-            hall = next((x for x in block_lines if self._wanted_hall(x)), "IMAX")
-            results.append(
-                {
-                    "movie": line,
-                    "hall": hall[:100],
-                    "times": [{"start": t} for t in times],
-                    "date": date_display,
-                    "date_raw": date_raw,
-                }
-            )
-
-        return results
-
     def close(self):
-        if self._driver:
-            try:
-                self._driver.quit()
-            except Exception:
-                pass
-            self._driver = None
-
-    def _dedupe(self, schedules):
-        out = []
-        seen = set()
-        for r in schedules:
-            key = (
-                r.get("date_raw"),
-                r.get("movie"),
-                r.get("hall"),
-                tuple(t.get("start") for t in r.get("times", [])),
-            )
-            if key not in seen:
-                seen.add(key)
-                out.append(r)
-        return out
+        pass
 
     def format_message(self, schedules: list[dict]) -> str:
         if not schedules:
             return ""
 
-        now_str = _esc(datetime.now().strftime("%Y-%m-%d %H:%M"))
+        now_str = _esc(
+            datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+        )
+
         lines = [
-            "🚨 *CGV 오디세이 IMAX 발견\\!*",
+            "🚨 *CGV 광교 오디세이 IMAX 오픈\\!*",
             f"⏰ 감지 시각: {now_str}",
             "━━━━━━━━━━━━━━━━━━━━",
             "",
@@ -540,12 +231,18 @@ class CGVCrawler:
             for item in items:
                 lines.append(f"  🎥 {_esc(item['movie'])}")
                 lines.append(f"  🏛 {_esc(item['hall'])}")
-                lines.append(
-                    f"  ⏰ {_esc(', '.join(t['start'] for t in item.get('times', [])))}"
-                )
+
+                time_parts = []
+                for t in item.get("times", []):
+                    s = t["start"]
+                    if "free" in t and "total" in t:
+                        s += f" ({t['free']}/{t['total']}석)"
+                    time_parts.append(s)
+
+                lines.append(f"  ⏰ {_esc(', '.join(time_parts))}")
             lines.append("")
 
-        lines.append("👇 *CGV에서 바로 예매를 확인하세요\\!*")
+        lines.append("👇 *지금 바로 CGV에서 확인하세요\\!*")
         return "\n".join(lines)
 
 
