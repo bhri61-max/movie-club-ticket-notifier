@@ -2,10 +2,6 @@ name: 오디세이 광교 IMAX 보조 감시
 
 on:
   workflow_dispatch:
-  # 이번 수정본을 즉시 대기열에 올리기 위한 임시 트리거
-  push:
-    paths:
-      - ".github/workflows/main.yml"
   schedule:
     # 연속 감시가 끊겼을 때만 살리는 비상용 백업 (6시간마다)
     - cron: "17 */6 * * *"
