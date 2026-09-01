@@ -2,14 +2,13 @@ name: 오디세이 광교 IMAX 보조 감시
 
 on:
   workflow_dispatch:
-  # 이 워크플로 파일 자체를 수정하면 새 버전으로 즉시 대기열을 갱신
+  # 이번 수정본을 즉시 대기열에 올리기 위한 임시 트리거
   push:
     paths:
       - ".github/workflows/main.yml"
   schedule:
-    # 비상용 백업 스케줄. 실제 연속 감시는 각 실행이 다음 실행을 직접 예약함.
-    # 매시간 초반 혼잡을 피해서 17분에 시도
-    - cron: "17 * * * *"
+    # 연속 감시가 끊겼을 때만 살리는 비상용 백업 (6시간마다)
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: write
@@ -25,16 +24,6 @@ jobs:
     timeout-minutes: 62
 
     steps:
-      # 가장 먼저 다음 실행을 예약한다.
-      # 현재 실행이 도중에 실패해도 다음 실행이 대기 중이므로 감시가 이어진다.
-      - name: 다음 감시 자동 예약
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "다음 감시 실행을 미리 예약합니다."
-          curl --fail-with-body -sS -L -X POST             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer $GH_TOKEN"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"             -d '{"ref":"main"}'
-          echo "다음 감시 예약 완료"
-
       - name: 저장소 받기
         uses: actions/checkout@v4
         with:
@@ -92,13 +81,11 @@ jobs:
           echo "ChromeDriver: $CHROMEDRIVER_PATH"
 
           set +e
-          # 59분 후 Ctrl+C 방식으로 정상 종료를 시도하고,
-          # 30초 안에 종료되지 않으면 강제로 KILL하여 다음 실행이 막히지 않게 한다.
           timeout --signal=INT --kill-after=30s 3540s python -u main.py
           code=$?
 
           if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
-            echo "정상: 59분 감시 완료 및 강제 종료 처리"
+            echo "정상: 59분 감시 완료"
             exit 0
           fi
 
@@ -114,12 +101,7 @@ jobs:
 
             if ! git diff --cached --quiet; then
               git commit -m "Update IMAX monitor state [skip ci]"
-
-              # Telegram Secret 적용 단계가 config.yaml을 로컬에서 수정하므로
-              # rebase 전에 런타임 변경분을 깨끗이 제거한다.
-              # 상태 파일은 이미 위 커밋에 들어갔기 때문에 보존된다.
               git reset --hard HEAD
-
               git fetch origin main
               git rebase origin/main
               git push origin HEAD:main
@@ -130,3 +112,12 @@ jobs:
           else
             echo "저장할 상태 파일 없음"
           fi
+
+      - name: 다음 감시 시작 예약
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "현재 감시가 끝났으므로 다음 감시를 지금 예약합니다."
+          curl --fail-with-body -sS -L -X POST             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer $GH_TOKEN"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"             -d '{"ref":"main"}'
+          echo "다음 감시 예약 완료"
