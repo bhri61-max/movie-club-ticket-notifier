@@ -6,8 +6,10 @@ YAML 설정 파일을 읽고 검증하는 모듈
 import os
 import sys
 import logging
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -15,6 +17,44 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 EXAMPLE_CONFIG_PATH = Path(__file__).parent.parent / "config.example.yaml"
+
+
+def resolve_notify_from_date(value: str | date | None, today: date | None = None) -> str:
+    """CGV 알림 시작일을 YYYYMMDD로 변환합니다.
+
+    today는 한국 시간의 오늘을 사용합니다. 고정 날짜는 YYYYMMDD 또는
+    YYYY-MM-DD 형식으로 지정할 수 있고, 빈 값은 날짜 제한이 없습니다.
+    """
+    if value is None or str(value).strip() == "":
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y%m%d")
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+
+    value = str(value).strip()
+    if value.lower() == "today":
+        return (today or datetime.now(ZoneInfo("Asia/Seoul")).date()).strftime("%Y%m%d")
+
+    normalized = value.replace("-", "")
+    if len(normalized) != 8 or not normalized.isdigit():
+        raise ValueError("notify_from_date는 today, YYYYMMDD 또는 YYYY-MM-DD 형식이어야 합니다.")
+    return datetime.strptime(normalized, "%Y%m%d").strftime("%Y%m%d")
+
+
+def _resolve_cgv_dates(config: dict) -> None:
+    """설정을 로드할 때 상대 날짜를 한국 시간 기준으로 확정합니다."""
+    for watcher in config.get("watchers", []):
+        if watcher.get("type") != "cgv":
+            continue
+        settings = watcher.setdefault("settings", {})
+        configured = settings.get("notify_from_date", "today")
+        try:
+            resolved = resolve_notify_from_date(configured)
+        except ValueError as exc:
+            raise ValueError(f"{watcher.get('name', 'CGV')}: {exc}") from exc
+        settings["notify_from_date"] = resolved
+        logger.info("[%s] 알림 시작일: %s", watcher.get("name", "CGV"), resolved or "제한없음")
 
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
@@ -39,6 +79,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
 
     _validate_config(config)
     _apply_env_overrides(config)
+    _resolve_cgv_dates(config)
 
     return config
 
