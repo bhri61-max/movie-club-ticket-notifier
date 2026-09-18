@@ -1,0 +1,35 @@
+name: CGV curl-cffi diagnostic
+
+on:
+  push:
+    paths:
+      - ".github/workflows/cgv-cffi-diagnostic.yml"
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect CGV with curl-cffi
+        run: |
+          pip install -q curl_cffi
+          python - <<'PY'
+          import json
+          from curl_cffi import requests
+          s=requests.Session(impersonate="chrome")
+          page=s.get("https://cgv.co.kr/cnm/movieBook",timeout=20)
+          print("PAGE",page.status_code)
+          for ymd in ["20260923","20260924","20260925","20260926","20260927","20260928","20260929"]:
+              r=s.get("https://cgv.co.kr/api/v1/booking/searchMovScnInfo",
+                  params={"coCd":"A420","siteNo":"0257","scnYmd":ymd,"rtctlScopCd":"08"},
+                  headers={"Accept":"application/json, text/plain, */*","Accept-Language":"ko-KR,ko;q=0.9","Referer":"https://cgv.co.kr/cnm/movieBook"},
+                  timeout=20)
+              print("HTTP",ymd,r.status_code)
+              if r.status_code != 200:
+                  continue
+              payload=r.json(); data=payload.get("data") or []
+              rows=[x for x in data if "오디세이" in str(x.get("movNm","")) and "IMAX" in (str(x.get("scnsNm",""))+" "+str(x.get("movkndDsplNm",""))).upper()]
+              print("DATE",ymd,"TOTAL",len(data),"MATCH",len(rows))
+              for x in rows:
+                  keep={k:x.get(k) for k in ["movNm","scnsNm","movkndDsplNm","scnYmd","scnsrtTm","scnendTm","frSeatCnt","stcnt","scnsNo","scnSseq","prodNo","rsvPsbYn","atktPsbYn","saleYn"] if k in x}
+                  print(json.dumps(keep,ensure_ascii=False,sort_keys=True))
+          PY
