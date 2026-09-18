@@ -2,6 +2,9 @@ name: 오디세이 광교 IMAX 보조 감시
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "src/crawlers/cgv.py"
 
 permissions:
   contents: write
@@ -9,7 +12,7 @@ permissions:
 
 concurrency:
   group: odyssey-gwanggyo-imax-monitor
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   monitor:
