@@ -1,31 +1,24 @@
-"""
-CGV 상영 일정 크롤러
-- 2026년 신 CGV 공개 JSON API 사용
+"""CGV 상영 일정 크롤러
+- 2026년 CGV JSON API 사용
+- curl_cffi로 실제 Chrome TLS 지문을 사용해 최신 예매 데이터를 조회
 - 광교(0257)에서 오디세이 + IMAX 상영회차를 직접 조회
 """
 
 import json
 import logging
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-API_URL = (
-    "https://cgv.co.kr/api/v1/booking/searchMovScnInfo"
-    "?coCd=A420&siteNo={site}&scnYmd={ymd}&rtctlScopCd=08"
-)
-BOOKING_URL = "https://cgv.co.kr/cnm/movieBook/cinema"
+API_URL = "https://cgv.co.kr/api/v1/booking/searchMovScnInfo"
+BOOKING_URL = "https://cgv.co.kr/cnm/movieBook"
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    ),
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "ko-KR,ko;q=0.9",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
     "Referer": BOOKING_URL,
 }
 
@@ -41,6 +34,9 @@ class CGVCrawler:
         self.movie_keywords = [
             kw.upper() for kw in settings.get("movie_keywords", ["오디세이"])
         ]
+        self._session = None
+        self._session_created_at = 0.0
+        self._session_refresh_seconds = 1800
 
     def _wanted_movie(self, text: str) -> bool:
         up = (text or "").upper()
@@ -50,9 +46,83 @@ class CGVCrawler:
         up = (text or "").upper()
         return any(k in up for k in self.hall_keywords)
 
-    def check(self) -> dict:
-        import requests
+    def _ensure_session(self):
+        from curl_cffi import requests as cf_requests
 
+        now = time.monotonic()
+        if (
+            self._session is None
+            or (now - self._session_created_at) > self._session_refresh_seconds
+        ):
+            logger.info("CGV 브라우저 세션 새로 발급")
+            session = cf_requests.Session(impersonate="chrome")
+            page = session.get(BOOKING_URL, timeout=20)
+            if page.status_code != 200:
+                raise RuntimeError(
+                    f"CGV 예매 페이지 방문 실패: HTTP {page.status_code}"
+                )
+            self._session = session
+            self._session_created_at = now
+
+        return self._session
+
+    def _fetch_day(self, ymd: str):
+        """하루 시간표를 최신 CGV 브라우저 세션으로 조회한다."""
+        last_error = None
+
+        for attempt in range(2):
+            try:
+                session = self._ensure_session()
+                resp = session.get(
+                    API_URL,
+                    params={
+                        "coCd": "A420",
+                        "siteNo": self.theater_code,
+                        "scnYmd": ymd,
+                        "rtctlScopCd": "08",
+                    },
+                    headers=HEADERS,
+                    timeout=20,
+                )
+
+                text = resp.text or ""
+
+                if resp.status_code in (403, 429):
+                    logger.warning(
+                        f"CGV API {ymd}: HTTP {resp.status_code}, 세션 재발급 후 재시도"
+                    )
+                    self._session = None
+                    last_error = RuntimeError(f"HTTP {resp.status_code}")
+                    continue
+
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"CGV API {ymd}: HTTP {resp.status_code}, 응답 {len(text)}자"
+                    )
+
+                if text.lstrip().startswith("<"):
+                    raise RuntimeError(f"CGV API {ymd}: HTML 차단 응답")
+
+                payload = resp.json()
+                if payload.get("statusCode") not in (None, 0):
+                    raise RuntimeError(
+                        f"CGV API {ymd}: {payload.get('statusMessage')}"
+                    )
+
+                rows = payload.get("data") or []
+                if not isinstance(rows, list):
+                    rows = []
+                return rows
+
+            except Exception as e:
+                last_error = e
+                self._session = None
+                if attempt == 0:
+                    continue
+
+        raise last_error or RuntimeError(f"CGV API {ymd} 조회 실패")
+
+    def check(self) -> dict:
         schedules = []
         raw_rows = []
         today = datetime.now(ZoneInfo("Asia/Seoul")).date()
@@ -62,37 +132,8 @@ class CGVCrawler:
             ymd = d.strftime("%Y%m%d")
             date_display = d.strftime("%Y-%m-%d")
 
-            url = API_URL.format(site=self.theater_code, ymd=ymd)
-
             try:
-                resp = requests.get(url, headers=HEADERS, timeout=20)
-                text = resp.text or ""
-
-                if resp.status_code != 200:
-                    logger.warning(
-                        f"CGV API {ymd}: HTTP {resp.status_code}, 응답 {len(text)}자"
-                    )
-                    raw_rows.append(
-                        {"date": ymd, "http": resp.status_code, "error": text[:200]}
-                    )
-                    continue
-
-                if text.lstrip().startswith("<"):
-                    logger.warning(f"CGV API {ymd}: HTML 차단 응답")
-                    raw_rows.append({"date": ymd, "blocked": True})
-                    continue
-
-                try:
-                    payload = resp.json()
-                except Exception as e:
-                    logger.warning(f"CGV API {ymd}: JSON 해석 실패: {e}")
-                    raw_rows.append({"date": ymd, "json_error": str(e)})
-                    continue
-
-                rows = payload.get("data") or []
-                if not isinstance(rows, list):
-                    rows = []
-
+                rows = self._fetch_day(ymd)
                 logger.info(f"CGV API {ymd}: 전체 상영 {len(rows)}건")
 
                 grouped = {}
@@ -186,7 +227,14 @@ class CGVCrawler:
                             {
                                 "movie": item["movie"],
                                 "hall": item["hall"],
-                                "times": [t["start"] for t in item["times"]],
+                                "times": [
+                                    {
+                                        "start": t["start"],
+                                        "free": t.get("free"),
+                                        "total": t.get("total"),
+                                    }
+                                    for t in item["times"]
+                                ],
                             }
                             for item in day_results
                         ],
@@ -205,7 +253,12 @@ class CGVCrawler:
         }
 
     def close(self):
-        pass
+        try:
+            if self._session is not None:
+                self._session.close()
+        except Exception:
+            pass
+        self._session = None
 
     def format_message(self, schedules: list[dict]) -> str:
         if not schedules:
