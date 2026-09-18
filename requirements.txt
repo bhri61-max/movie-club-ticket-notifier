@@ -2,6 +2,7 @@
 python-telegram-bot[job-queue]>=22.0
 pyyaml>=6.0
 requests>=2.31
+curl_cffi>=0.13
 beautifulsoup4>=4.12
 
 # CGV Cloudflare bypass (fallback)
