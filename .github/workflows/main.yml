@@ -87,24 +87,81 @@ jobs:
       - name: 상태 파일 저장
         if: always()
         run: |
-          if compgen -G "data/state/*.json" > /dev/null; then
-            git config user.name "cgv-imax-monitor"
-            git config user.email "actions@github.com"
+          set -e
+
+          if ! compgen -G "data/state/*.json" > /dev/null; then
+            echo "저장할 상태 파일 없음"
+            exit 0
+          fi
+
+          # 실행 중에 다른 커밋이 생겨도 상태 파일이 충돌하지 않도록
+          # 로컬 상태를 임시 보관한 뒤 최신 main과 합쳐서 저장한다.
+          rm -rf /tmp/cgv-state
+          mkdir -p /tmp/cgv-state
+          cp data/state/*.json /tmp/cgv-state/
+
+          git config user.name "cgv-imax-monitor"
+          git config user.email "actions@github.com"
+
+          for attempt in 1 2 3; do
+            echo "상태 저장 시도 $attempt/3"
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p data/state
+
+            python - <<'PY'
+          import json
+          from pathlib import Path
+
+          src_dir = Path("/tmp/cgv-state")
+          dst_dir = Path("data/state")
+
+          for src in src_dir.glob("*.json"):
+              dst = dst_dir / src.name
+              local = json.loads(src.read_text(encoding="utf-8"))
+              remote = {}
+              if dst.exists():
+                  try:
+                      remote = json.loads(dst.read_text(encoding="utf-8"))
+                  except Exception:
+                      remote = {}
+
+              merged = dict(remote)
+              merged.update(local)
+
+              # 이미 본 CGV 회차는 원격/현재 실행 기록을 합쳐서 보존한다.
+              remote_keys = remote.get("cgv_seen_schedule_keys", [])
+              local_keys = local.get("cgv_seen_schedule_keys", [])
+              if remote_keys or local_keys:
+                  merged["cgv_seen_schedule_keys"] = sorted(
+                      set(map(str, remote_keys)) | set(map(str, local_keys))
+                  )
+
+              dst.write_text(
+                  json.dumps(merged, ensure_ascii=False, indent=2),
+                  encoding="utf-8",
+              )
+          PY
+
             git add -f data/state/*.json
 
-            if ! git diff --cached --quiet; then
-              git commit -m "Update IMAX monitor state [skip ci]"
-              git reset --hard HEAD
-              git fetch origin main
-              git rebase origin/main
-              git push origin HEAD:main
-              echo "IMAX 감시 상태 저장 완료"
-            else
+            if git diff --cached --quiet; then
               echo "상태 변경 없음"
+              exit 0
             fi
-          else
-            echo "저장할 상태 파일 없음"
-          fi
+
+            git commit -m "Update IMAX monitor state [skip ci]"
+
+            if git push origin HEAD:main; then
+              echo "IMAX 감시 상태 저장 완료"
+              exit 0
+            fi
+
+            echo "원격 변경 감지 - 최신 main과 다시 합쳐 재시도"
+          done
+
+          echo "상태 저장 3회 실패"
+          exit 1
 
       # 현재 감시와 상태 저장이 끝난 뒤 다음 실행을 생성한다.
       # 예약 실행은 사용하지 않으며, 사용자가 실행을 취소하면 이어서 예약하지 않는다.
